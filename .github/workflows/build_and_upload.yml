@@ -105,7 +105,7 @@ jobs:
 
   build-bridge-exit:
     name: Build Bridge, Exit, and Broker (Musl)
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code
@@ -173,7 +173,7 @@ jobs:
   upload:
     if: github.ref == 'refs/heads/master'
     needs: [build, build-bridge-exit]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Download all artifacts
