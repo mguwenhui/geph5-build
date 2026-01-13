@@ -1,0 +1,205 @@
+name: Build and Upload
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            dir: musl
+            artifact_name: musl-latest
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-musl
+            dir: musl-arm64
+            artifact_name: musl-arm64-latest
+          # - os: ubuntu-24.04 
+          #   target: x86_64-unknown-linux-gnu
+          #   dir: gnu
+          #   artifact_name: gnu-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ----------  Rust / Cargo caches  ----------
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry--${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry--
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git--${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git--
+
+      - name: Cache cargo binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/binaries
+          key: ${{ runner.os }}-cargo-bin--${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bin--
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ matrix.target }}--${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-${{ matrix.target }}--
+
+      # ----------  End caches  ----------
+      - name: Install musl-tools (Linux)
+        if: ${{ matrix.dir == 'musl' || matrix.dir == 'musl-arm64' }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          target: ${{ matrix.target }}
+
+      - name: Install cross (only for arm64)
+        if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
+        run: cargo install cross --locked
+
+      - name: Build client
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            cross build --locked --release --target "${{ matrix.target }}" --manifest-path binaries/geph5-client/Cargo.toml
+          else
+            cargo build --locked --release --target "${{ matrix.target }}" --features aws_lambda --manifest-path binaries/geph5-client/Cargo.toml
+          fi
+
+      - name: Create artifacts directory (确保目录存在)
+        run: mkdir -p artifacts/${{ matrix.dir }}
+
+      - name: Move client binaries to artifacts directory
+        shell: bash
+        run: |
+          mv target/${{ matrix.target }}/release/geph5-client artifacts/${{ matrix.dir }}/
+          # 验证文件是否移动成功
+          ls -la artifacts/${{ matrix.dir }}/
+
+      # 核心：GitHub Artifact 临时保存编译文件
+      - name: Upload client artifact (GitHub临时保存)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/${{ matrix.dir }}/
+          retention-days: 7  # 临时保存7天（可按需调整，最大90天）
+          if-no-files-found: error  # 无文件时直接报错，避免静默失败
+
+  build-bridge-exit:
+    name: Build Bridge, Exit, and Broker (Musl)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ----------  Rust / Cargo caches  ----------
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-BEB-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-BEB-
+      # ----------  End caches  ----------
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          target: x86_64-unknown-linux-musl
+
+      - name: Set default host
+        shell: bash
+        run: rustup set default-host x86_64-unknown-linux-musl
+
+      - name: Build bridge and exit and broker
+        run: |
+          cargo build --locked --release --target x86_64-unknown-linux-musl --manifest-path binaries/geph5-bridge/Cargo.toml
+          cargo build --locked --release --target x86_64-unknown-linux-musl --manifest-path binaries/geph5-exit/Cargo.toml
+          cargo build --locked --release --target x86_64-unknown-linux-musl --manifest-path binaries/geph5-broker/Cargo.toml
+
+      - name: Create artifacts directory (确保目录存在)
+        run: mkdir -p artifacts/musl
+
+      - name: Move bridge and exit binaries to artifacts directory
+        run: |
+          mv target/x86_64-unknown-linux-musl/release/geph5-bridge artifacts/musl/
+          mv target/x86_64-unknown-linux-musl/release/geph5-broker artifacts/musl/
+          mv target/x86_64-unknown-linux-musl/release/geph5-exit artifacts/musl/
+          # 验证文件是否移动成功
+          ls -la artifacts/musl/
+
+      # 核心：GitHub Artifact 临时保存编译文件
+      - name: Upload bridge/exit/broker artifact (GitHub临时保存)
+        uses: actions/upload-artifact@v4
+        with:
+          name: musl-latest-bridge-exit
+          path: artifacts/musl/
+          retention-days: 7  # 临时保存7天
+          if-no-files-found: error
+
+  # 保留upload job仅用于下载并汇总Artifact（无R2上传）
+  upload:
+    if: github.ref == 'refs/heads/master'
+    needs: [build, build-bridge-exit]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download all artifacts (GitHub临时保存的编译文件)
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # 保留下载的Artifact原始目录结构，方便查看
+
+      - name: 整理并验证artifacts目录
+        run: |
+          # 查看所有下载的编译文件
+          ls -la artifacts/
+          # 汇总musl相关文件到统一目录（仅用于验证，非必需）
+          mkdir -p artifacts/musl-all
+          cp -r artifacts/musl-latest/* artifacts/musl-all/ || true
+          cp -r artifacts/musl-latest-bridge-exit/* artifacts/musl-all/ || true
+          # 最终验证所有编译产物
+          ls -la artifacts/musl-all/
